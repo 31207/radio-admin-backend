@@ -51,12 +51,10 @@ from sqlalchemy import cast, delete, func, select, String
 from radio_backend.config import settings
 from radio_backend.covers import fetch_cover
 from radio_backend.db import PlayHistory, Song, User, UserRequest, get_session_factory, init_db
-from radio_backend.notices import NoticeService
 from radio_backend.render import render_history_image
 from radio_backend.screening import RULES, ScreeningService
 from radio_backend.util import beijing_naive_now, today_key
 
-notices = NoticeService()
 screening = ScreeningService()
 
 
@@ -245,8 +243,6 @@ async def select_many(body: SelectManyIn):
                 )
             )
         await s.commit()
-    for song in songs:
-        await notices.add(song.id, song.name, song.artist)
     return {"ok": True, "count": len(songs)}
 
 
@@ -268,7 +264,6 @@ async def select_song(sid: int, body: SelectIn):
             PlayHistory(song_id=sid, user_id=body.user_id, note=body.note, played_at=now, created_at=now)
         )
         await s.commit()
-    await notices.add(song.id, song.name, song.artist)
     return {"ok": True}
 
 
@@ -704,15 +699,6 @@ class ScreenSongsIn(BaseModel):
 @app.post("/api/agent/screen-songs", **_auth)
 async def screen_songs(body: ScreenSongsIn):
     return {"data": await screening.screen(body.song_ids)}
-
-
-# ---------------------------------------------------------------- 通知状态
-
-
-@app.get("/api/notices/status", **_auth)
-async def notices_status():
-    pending, sent_count, failed = await notices.status()
-    return {"data": {"pending": pending, "sent_count": sent_count, "failed": failed}}
 
 
 # ---------------------------------------------------------------- 统计
