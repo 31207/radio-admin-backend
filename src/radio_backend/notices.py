@@ -73,18 +73,21 @@ class NoticeService:
         failed: list[dict] = []
         sent_count = 0
         for r in rows:
+            failed_ids = list(
+                dict.fromkeys([*_load_ids(r.failed_user_ids), *_load_ids(r.rejected_user_ids)])
+            )
             item = {
                 "id": r.id,
                 "name": r.name,
                 "artist": r.artist,
                 "selected_at": r.selected_at,
                 "attempts": r.attempts,
-                "failed_user_ids": _load_ids(r.failed_user_ids),
+                "failed_user_ids": failed_ids,
             }
             if not r.sent:
-                item["user_ids"] = (
-                    _load_ids(r.failed_user_ids) if r.attempts else _load_ids(r.user_ids)
-                )
+                rejected = set(_load_ids(r.rejected_user_ids))
+                retry = _load_ids(r.failed_user_ids) if r.attempts else _load_ids(r.user_ids)
+                item["user_ids"] = [uid for uid in retry if uid not in rejected]
                 pending.append(item)
             elif item["failed_user_ids"]:
                 failed.append(item)

@@ -159,6 +159,9 @@ class SongSelectedNotice(Base):
     selected_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
     user_ids: Mapped[str] = mapped_column(String, nullable=False, default="[]")
     failed_user_ids: Mapped[str] = mapped_column(String, nullable=False, default="[]")
+    rejected_user_ids: Mapped[str] = mapped_column(
+        String, nullable=False, default="[]", server_default="[]"
+    )
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
