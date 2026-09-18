@@ -49,7 +49,6 @@ from pydantic import BaseModel
 from sqlalchemy import cast, delete, func, select, String
 
 from radio_backend.config import settings
-from radio_backend.covers import fetch_cover
 from radio_backend.db import PlayHistory, Song, User, UserRequest, get_session_factory, init_db
 from radio_backend.render import render_history_image
 from radio_backend.screening import RULES, ScreeningService
@@ -495,10 +494,11 @@ async def history_image(body: HistoryImageIn):
         records = (
             await s.execute(
                 select(
+                    Song.id.label("song_id"),
                     Song.name,
                     Song.artist,
-                    Song.cover,
-                    PlayHistory.user_id,
+                    Song.album,
+                    Song.source,
                     PlayHistory.played_at,
                 )
                 .join(Song, Song.id == PlayHistory.song_id)
@@ -506,27 +506,45 @@ async def history_image(body: HistoryImageIn):
                 .order_by(PlayHistory.played_at.asc())
             )
         ).mappings().all()
+        song_ids = {r["song_id"] for r in records}
+        counts: dict[int, int] = {}
+        if song_ids:
+            counts = dict(
+                (
+                    await s.execute(
+                        select(
+                            UserRequest.song_id,
+                            func.count(func.distinct(UserRequest.user_id)),
+                        )
+                        .where(UserRequest.song_id.in_(song_ids))
+                        .group_by(UserRequest.song_id)
+                    )
+                ).all()
+            )
     if not records:
         raise HTTPException(404, "该时间范围内没有播放记录")
 
-    items = [dict(r) for r in records]
-    tasks: dict[str, object] = {}
-    for r in items:
-        url = r.get("cover") or ""
-        if not url or url in tasks:
+    days_map: dict = {}
+    for r in records:
+        day = r["played_at"].date()
+        songs = days_map.setdefault(day, {})
+        if r["song_id"] in songs:
             continue
-        tasks[url] = fetch_cover(
-            settings.music_api_base,
-            url,
-            settings.cover_dir,
-            r.get("name") or "",
-            r.get("artist") or "",
-        )
-    covers: dict[str, object] = {}
-    if tasks:
-        covers = dict(zip(tasks.keys(), await asyncio.gather(*tasks.values())))
+        songs[r["song_id"]] = {
+            "name": r["name"],
+            "artist": r["artist"],
+            "album": r["album"],
+            "source": r["source"],
+            "requesters": int(counts.get(r["song_id"], 0)),
+        }
 
-    png = await asyncio.to_thread(render_history_image, label, items, covers)
+    days = [
+        {"date": day, "songs": list(songs.values())}
+        for day, songs in sorted(days_map.items(), reverse=True)
+    ]
+    total = sum(len(day["songs"]) for day in days)
+
+    png = await asyncio.to_thread(render_history_image, label, days, total)
     return Response(content=png, media_type="image/png")
 
 

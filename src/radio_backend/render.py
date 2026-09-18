@@ -11,16 +11,16 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from radio_backend.util import format_short_time
-
 logger = logging.getLogger("radio_backend.render")
 
 WIDTH = 920
 PAD = 28
 HEADER_H = 118
 FOOTER_H = 52
-HISTORY_CARD_H = 132
-HISTORY_COVER = 100
+
+DAY_HEADER_H = 52
+SONG_ROW_H = 64
+DAY_GAP = 18
 
 BG = (245, 246, 248)
 ROW_BG = (255, 255, 255)
@@ -28,9 +28,31 @@ DIVIDER = (229, 231, 236)
 TEXT_MAIN = (33, 37, 43)
 TEXT_SUB = (128, 134, 143)
 ACCENT = (76, 141, 255)
-PLACEHOLDER_BG = (235, 238, 242)
 
-COVER_RADIUS = 10
+SOURCE_NAMES = {
+    "netease": "网易云",
+    "qq": "QQ音乐",
+    "kugou": "酷狗",
+    "kuwo": "酷我",
+    "migu": "咪咕",
+    "joox": "JOOX",
+    "soda": "汽水",
+    "jamendo": "Jamendo",
+    "qianqian": "千千",
+    "bilibili": "B站",
+    "fivesing": "5sing",
+}
+
+SOURCE_COLORS = {
+    "netease": (227, 59, 59),
+    "qq": (49, 194, 124),
+    "kugou": (44, 166, 248),
+    "kuwo": (255, 126, 5),
+    "migu": (255, 62, 77),
+    "soda": (58, 130, 246),
+}
+
+_WEEK_CN = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
 
 _REGULAR_CANDIDATES = (
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -151,115 +173,109 @@ def _truncate(draw: ImageDraw.ImageDraw, text: str, font, max_w: float) -> str:
     return f"{text}…" if text else ""
 
 
-def _center_crop(img: Image.Image, size: int) -> Image.Image:
-    w, h = img.size
-    side = min(w, h)
-    left = (w - side) // 2
-    top = (h - side) // 2
-    return img.crop((left, top, left + side, top + side)).resize(
-        (size, size), Image.LANCZOS
-    )
+def _day_block_height(song_count: int) -> int:
+    return DAY_HEADER_H + song_count * SONG_ROW_H
 
 
-def _rounded(img: Image.Image, radius: int) -> Image.Image:
-    img = img.convert("RGBA")
-    mask = Image.new("L", img.size, 0)
-    d = ImageDraw.Draw(mask)
-    d.rounded_rectangle(
-        (0, 0, img.size[0] - 1, img.size[1] - 1), radius=radius, fill=255
-    )
-    img.putalpha(mask)
-    return img
+def render_history_image(range_label: str, days: list[dict], total: int) -> bytes:
+    """把播放历史按天分块画成长图。
 
-
-def _draw_cover(canvas: Image.Image, pos: tuple[int, int], cover, size: int) -> None:
-    x, y = pos
-    if cover is not None:
-        img = _rounded(_center_crop(cover, size), COVER_RADIUS)
-        canvas.paste(img, (x, y), img)
-        return
-    d = ImageDraw.Draw(canvas)
-    d.rounded_rectangle(
-        (x, y, x + size - 1, y + size - 1),
-        radius=COVER_RADIUS,
-        fill=PLACEHOLDER_BG,
-    )
-    note_font = _font(30)
-    note = "♪"
-    tw = d.textlength(note, font=note_font)
-    d.text(
-        (x + (size - tw) / 2, y + size / 2 - 22),
-        note,
-        font=note_font,
-        fill=(170, 175, 182),
-    )
-
-
-def render_history_image(
-    range_label: str,
-    records: list[dict],
-    covers: dict[str, Image.Image | None],
-) -> bytes:
-    """把一段播放历史画成卡片式长图。
-
-    records 需含 name/artist/cover/played_at/user_id；
-    covers 以封面 URL 为键，封面缺失时绘制占位符。
+    days 为倒序的日列表，每项含 date 与 songs；
+    songs 按时间正序，每项含 name/artist/album/source/requesters。
     """
-    total = len(records)
-    height = HEADER_H + 40 + total * HISTORY_CARD_H + FOOTER_H
+    blocks = sum(_day_block_height(len(day["songs"])) for day in days)
+    height = HEADER_H + 24 + blocks + DAY_GAP * max(0, len(days) - 1) + FOOTER_H
     canvas = Image.new("RGB", (WIDTH, height), BG)
     d = ImageDraw.Draw(canvas)
 
     f_title = _font(34, bold=True)
     f_sub = _font(22)
-    f_name = _font(28, bold=True)
-    f_artist = _font(22)
+    f_day = _font(26, bold=True)
+    f_count = _font(20)
+    f_name = _font(26, bold=True)
     f_meta = _font(20)
+    f_right = _font(20)
+    f_right_bold = _font(20, bold=True)
     f_footer = _font(20)
 
     d.text((PAD, 20), "校园广播站 · 播放记录", font=f_title, fill=TEXT_MAIN)
-    sub = f"{range_label}    共 {total} 首"
+    sub = f"{range_label}    共 {total} 首 · {len(days)} 天"
     d.text((PAD, 78), sub, font=f_sub, fill=TEXT_SUB)
     d.line((PAD, HEADER_H - 1, WIDTH - PAD, HEADER_H - 1), fill=DIVIDER, width=2)
 
-    card_h = HISTORY_CARD_H - 16
-    for i, r in enumerate(records):
-        y0 = HEADER_H + 32 + i * HISTORY_CARD_H
+    left_x = PAD + 18
+    right_x = WIDTH - PAD - 18
+    max_text_w = right_x - left_x - 170
+
+    y = HEADER_H + 24
+    for day in days:
+        date = day["date"]
+        songs = day["songs"]
+        block_h = _day_block_height(len(songs))
         d.rounded_rectangle(
-            (PAD, y0, WIDTH - PAD, y0 + card_h),
+            (PAD, y, WIDTH - PAD, y + block_h),
             radius=12,
             fill=ROW_BG,
             outline=DIVIDER,
-        )
-        _draw_cover(
-            canvas,
-            (PAD + 16, y0 + (card_h - HISTORY_COVER) // 2),
-            covers.get(r.get("cover") or ""),
-            size=HISTORY_COVER,
+            width=2,
         )
 
-        text_x = PAD + 16 + HISTORY_COVER + 22
-        right_x = WIDTH - PAD - 16
-        max_text_w = right_x - text_x - 190
+        date_text = f"{date.month}月{date.day}日  {_WEEK_CN[date.weekday()]}"
+        d.text((left_x, y + 14), date_text, font=f_day, fill=TEXT_MAIN)
+        d.text((right_x, y + 18), f"{len(songs)} 首", font=f_count, fill=TEXT_SUB, anchor="ra")
+        d.line(
+            (PAD + 12, y + DAY_HEADER_H - 1, WIDTH - PAD - 12, y + DAY_HEADER_H - 1),
+            fill=DIVIDER,
+            width=1,
+        )
 
-        name = r.get("name") or "未知歌曲"
-        artist = r.get("artist") or "未知歌手"
-        d.text((text_x, y0 + 20), _truncate(d, name, f_name, max_text_w), font=f_name, fill=TEXT_MAIN)
-        d.text((text_x, y0 + 62), _truncate(d, artist, f_artist, max_text_w), font=f_artist, fill=TEXT_SUB)
+        for i, song in enumerate(songs):
+            row_y = y + DAY_HEADER_H + i * SONG_ROW_H
+            name = song.get("name") or "未知歌曲"
+            artist = song.get("artist") or "未知歌手"
+            album = song.get("album") or ""
+            meta = f"{artist} · {album}" if album else artist
 
-        if r.get("user_id"):
             d.text(
-                (text_x, y0 + 96),
-                _truncate(d, f"点歌人 {r['user_id']}", f_meta, max_text_w),
+                (left_x, row_y + 10),
+                _truncate(d, name, f_name, max_text_w),
+                font=f_name,
+                fill=TEXT_MAIN,
+            )
+            d.text(
+                (left_x, row_y + 40),
+                _truncate(d, meta, f_meta, max_text_w),
                 font=f_meta,
-                fill=ACCENT,
+                fill=TEXT_SUB,
             )
 
-        time_text = format_short_time(r.get("played_at"))
-        d.text((right_x, y0 + 38), time_text, font=f_meta, fill=TEXT_SUB, anchor="ra")
+            source = song.get("source") or ""
+            d.text(
+                (right_x, row_y + 10),
+                SOURCE_NAMES.get(source, source),
+                font=f_right_bold,
+                fill=SOURCE_COLORS.get(source, ACCENT),
+                anchor="ra",
+            )
+            d.text(
+                (right_x, row_y + 40),
+                f"点歌人数 {int(song.get('requesters') or 0)}",
+                font=f_right,
+                fill=TEXT_SUB,
+                anchor="ra",
+            )
+
+            if i < len(songs) - 1:
+                d.line(
+                    (PAD + 12, row_y + SONG_ROW_H - 1, WIDTH - PAD - 12, row_y + SONG_ROW_H - 1),
+                    fill=DIVIDER,
+                    width=1,
+                )
+
+        y += block_h + DAY_GAP
 
     footer = "生成于 " + datetime.now().strftime("%Y-%m-%d %H:%M")
-    fy = HEADER_H + 32 + total * HISTORY_CARD_H + (FOOTER_H - 24) / 2
+    fy = y - DAY_GAP + (FOOTER_H - 24) / 2
     d.text((WIDTH / 2, fy), footer, font=f_footer, fill=TEXT_SUB, anchor="ma")
 
     buf = io.BytesIO()
